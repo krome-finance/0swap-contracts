@@ -161,25 +161,27 @@ contract UniswapV2Router02 {
     {
         uint256 feeRate = IZeroswapComptroller(IUniswapV2Factory(factory).swapComptroller()).fee();
         swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, amountInDesired, amountOutDesired, feeRate);
-        swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
+        if (swapAmountIn > 0) {
+            swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
 
-        TransferHelper.safeTransferFrom(
-            tokenIn,
-            msg.sender,
-            pair,
-            swapAmountIn
-        );
- 
-        (address token0, ) = UniswapV2Library.sortTokens(tokenIn, tokenOut);
-        IUniswapV2Pair(pair)
-            .swap(token0 == tokenIn ? 0 : swapAmountOut, token0 == tokenIn ? swapAmountOut : 0, address(this), new bytes(0));
+            TransferHelper.safeTransferFrom(
+                tokenIn,
+                msg.sender,
+                pair,
+                swapAmountIn
+            );
+    
+            (address token0, ) = UniswapV2Library.sortTokens(tokenIn, tokenOut);
+            IUniswapV2Pair(pair)
+                .swap(token0 == tokenIn ? 0 : swapAmountOut, token0 == tokenIn ? swapAmountOut : 0, address(this), new bytes(0));
 
 
-        TransferHelper.safeTransfer(
-            tokenOut,
-            pair,
-            swapAmountOut
-        );
+            TransferHelper.safeTransfer(
+                tokenOut,
+                pair,
+                swapAmountOut
+            );
+        }
     }
 
     function _swapToAddLiquidityOptimalInternalD2(

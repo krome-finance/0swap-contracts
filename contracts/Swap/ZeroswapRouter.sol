@@ -203,32 +203,34 @@ contract ZeroswapRouter {
         bool discountable = swapComptroller.isDiscountable(tokenIn, tokenOut);
         uint256 feeRate = discountable ? swapComptroller.discountedFee() : swapComptroller.fee();
         swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, amountInDesired, amountOutDesired, feeRate);
-        swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
-        uint256 requiredFee = discountable ? swapComptroller.getRequiredFee(tokenIn, tokenOut, swapAmountIn, swapAmountOut) : 0;
-        require(requiredFee <= maxFee, "ZeroswapRouter: EXCESSIVE_FEE");
-        if (requiredFee > 0) {
+        if (swapAmountIn > 0) {
+            swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
+            uint256 requiredFee = discountable ? swapComptroller.getRequiredFee(tokenIn, tokenOut, swapAmountIn, swapAmountOut) : 0;
+            require(requiredFee <= maxFee, "ZeroswapRouter: EXCESSIVE_FEE");
+            if (requiredFee > 0) {
+                TransferHelper.safeTransferFrom(
+                    swapComptroller.feeToken(),
+                    msg.sender,
+                    address(swapComptroller),
+                    requiredFee
+                );
+            }
+
             TransferHelper.safeTransferFrom(
-                swapComptroller.feeToken(),
+                tokenIn,
                 msg.sender,
-                address(swapComptroller),
-                requiredFee
+                pair,
+                swapAmountIn
+            );
+
+            swapComptroller.swap(tokenIn, tokenOut, 0, swapAmountOut, address(this), new bytes(0));
+
+            TransferHelper.safeTransfer(
+                tokenOut,
+                pair,
+                swapAmountOut
             );
         }
-
-        TransferHelper.safeTransferFrom(
-            tokenIn,
-            msg.sender,
-            pair,
-            swapAmountIn
-        );
-
-        swapComptroller.swap(tokenIn, tokenOut, 0, swapAmountOut, address(this), new bytes(0));
-
-        TransferHelper.safeTransfer(
-            tokenOut,
-            pair,
-            swapAmountOut
-        );
     }
 
     function _swapToAddLiquidityOptimalInternalD2(
