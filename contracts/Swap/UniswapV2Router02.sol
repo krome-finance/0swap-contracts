@@ -144,14 +144,18 @@ contract UniswapV2Router02 {
             TransferHelper.safeTransferETH(msg.sender, msg.value - amountKLAY);
     }
 
+    struct AddLiquidityParams {
+        address token;
+        uint256 amountDesired;
+        uint256 amountMin;
+    }
+
     function _swapToAddLiquidityOptimalInternalD1(
         address pair,
-        address tokenIn,
-        address tokenOut,
+        AddLiquidityParams memory pIn,
+        AddLiquidityParams memory pOut,
         uint256 reserveIn,
-        uint256 reserveOut,
-        uint256 amountInDesired,
-        uint256 amountOutDesired
+        uint256 reserveOut
     ) 
         internal
         returns (
@@ -160,24 +164,23 @@ contract UniswapV2Router02 {
         )
     {
         uint256 feeRate = IZeroswapComptroller(IUniswapV2Factory(factory).swapComptroller()).fee();
-        swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, amountInDesired, amountOutDesired, feeRate);
+        swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, pIn.amountDesired, pOut.amountDesired, feeRate);
         if (swapAmountIn > 0) {
             swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
 
             TransferHelper.safeTransferFrom(
-                tokenIn,
-                msg.sender,
+                pIn.token,
+                pIn.token == WKLAY && msg.value > 0 ? address(this) : msg.sender,
                 pair,
                 swapAmountIn
             );
-    
-            (address token0, ) = UniswapV2Library.sortTokens(tokenIn, tokenOut);
-            IUniswapV2Pair(pair)
-                .swap(token0 == tokenIn ? 0 : swapAmountOut, token0 == tokenIn ? swapAmountOut : 0, address(this), new bytes(0));
 
+            (address token0, ) = UniswapV2Library.sortTokens(pIn.token, pOut.token);
+            IUniswapV2Pair(pair)
+                .swap(token0 == pIn.token ? 0 : swapAmountOut, token0 == pIn.token ? swapAmountOut : 0, address(this), new bytes(0));
 
             TransferHelper.safeTransfer(
-                tokenOut,
+                pOut.token,
                 pair,
                 swapAmountOut
             );
@@ -186,67 +189,88 @@ contract UniswapV2Router02 {
 
     function _swapToAddLiquidityOptimalInternalD2(
         address pair,
-        address tokenIn,
-        address tokenOut,
+        AddLiquidityParams memory pIn,
+        AddLiquidityParams memory pOut,
         uint256 reserveIn,
-        uint256 reserveOut,
-        uint256 amountInDesired,
-        uint256 amountOutDesired,
-        uint256 amountInMin,
-        uint256 amountOutMin
+        uint256 reserveOut
     ) 
         internal
         returns (
             uint256 amountIn,
-            uint256 amountOut
+            uint256 amountOut,
+            uint256 swapAmountIn
         )
     {
         uint256 swapAmountOut;
-        // to save local variable
-        (amountIn, swapAmountOut) = _swapToAddLiquidityOptimalInternalD1(pair, tokenIn, tokenOut, reserveIn, reserveOut, amountInDesired, amountOutDesired);
+        (swapAmountIn, swapAmountOut) = _swapToAddLiquidityOptimalInternalD1(pair, pIn, pOut, reserveIn, reserveOut);
         (amountIn, amountOut) = _addLiquidity(
-            tokenIn,
-            tokenOut,
-            amountInDesired - amountIn,
-            amountOutDesired + swapAmountOut,
-            amountInMin > amountIn ? amountInMin - amountIn : 0,
-            amountOutMin + swapAmountOut
+            pIn.token,
+            pOut.token,
+            pIn.amountDesired - swapAmountIn,
+            pOut.amountDesired + swapAmountOut,
+            pIn.amountMin > swapAmountIn ? pIn.amountMin - swapAmountIn : 0,
+            pOut.amountMin + swapAmountOut
         );
+        // reduce as already transfered to pair
         amountOut -= swapAmountOut;
     }
 
     function _swapToAddLiquidityOptimal(
         address pair,
-        address tokenA,
-        address tokenB,
-        uint256 amountADesired,
-        uint256 amountBDesired,
-        uint256 amountAMin,
-        uint256 amountBMin
+        AddLiquidityParams memory pA,
+        AddLiquidityParams memory pB
     )
         internal
         returns (
             uint256 amountA,
-            uint256 amountB
+            uint256 amountB,
+            uint256 swapAmountA,
+            uint256 swapAmountB
         )
     {
         (uint256 reserveA, uint256 reserveB) = UniswapV2Library.getReserves(
             factory,
-            tokenA,
-            tokenB
+            pA.token,
+            pB.token
         );
         {
-            if (reserveB * amountADesired >= reserveA * amountBDesired) {
-                (amountA, amountB) = _swapToAddLiquidityOptimalInternalD2(pair, tokenA, tokenB, reserveA, reserveB, amountADesired, amountBDesired, amountAMin, amountBMin);
+            if (reserveB * pA.amountDesired >= reserveA * pB.amountDesired) {
+                (amountA, amountB, swapAmountA) = _swapToAddLiquidityOptimalInternalD2(pair, pA, pB, reserveA, reserveB);
             } else {
-                (amountB, amountA) = _swapToAddLiquidityOptimalInternalD2(pair, tokenB, tokenA, reserveB, reserveA, amountBDesired, amountADesired, amountBMin, amountAMin);
+                (amountB, amountA, swapAmountB) = _swapToAddLiquidityOptimalInternalD2(pair, pB, pA, reserveB, reserveA);
             }
         }
-        (reserveA, reserveB) = UniswapV2Library.getReserves(
-            factory,
-            tokenA,
-            tokenB
-        );
+    }
+
+    function _addLiquidityOptimal(
+        AddLiquidityParams memory pA,
+        AddLiquidityParams memory pB,
+        address to
+    )
+        internal
+        returns (
+            uint256 amountA,
+            uint256 amountB,
+            uint256 liquidity
+        )
+    {
+        address pair = IUniswapV2Factory(factory).getPair(pA.token, pB.token);
+        if (pair == address(0)) {
+            (amountA, amountB) = _addLiquidity(
+                pA.token,
+                pB.token,
+                pA.amountDesired,
+                pB.amountDesired,
+                pA.amountMin,
+                pB.amountMin
+            );
+            pair = UniswapV2Library.pairFor(factory, pA.token, pB.token);
+        } else {
+            (amountA, amountB,,) = _swapToAddLiquidityOptimal(pair, pA, pB);
+        }
+        TransferHelper.safeTransferFrom(pA.token, msg.sender, pair, amountA);
+        TransferHelper.safeTransferFrom(pB.token, msg.sender, pair, amountB);
+        liquidity = IUniswapV2Pair(pair).mint(to);
     }
 
     function addLiquidityOptimal(
@@ -265,33 +289,57 @@ contract UniswapV2Router02 {
             uint256 amountA,
             uint256 amountB,
             uint256 liquidity
+        ) {
+        return _addLiquidityOptimal(
+            AddLiquidityParams(tokenA, amountADesired, amountAMin),
+            AddLiquidityParams(tokenB, amountBDesired, amountBMin),
+            to
+        );
+    }
+
+    function _addLiquidityKLAYOptimal(
+        AddLiquidityParams memory pToken,
+        uint256 amountKLAYMin,
+        address to
+    )
+        internal
+        returns (
+            uint256 amountToken,
+            uint256 amountKLAY,
+            uint256 liquidity
         )
     {
-        address pair = IUniswapV2Factory(factory).getPair(tokenA, tokenB);
+        address pair = IUniswapV2Factory(factory).getPair(pToken.token, WKLAY);
+        uint256 swappedKLAY;
         if (pair == address(0)) {
-            (amountA, amountB) = _addLiquidity(
-                tokenA,
-                tokenB,
-                amountADesired,
-                amountBDesired,
-                amountAMin,
-                amountBMin
+            (amountToken, amountKLAY) = _addLiquidity(
+                pToken.token,
+                WKLAY,
+                pToken.amountDesired,
+                msg.value,
+                pToken.amountMin,
+                amountKLAYMin
+    
             );
-            pair = UniswapV2Library.pairFor(factory, tokenA, tokenB);
+            pair = UniswapV2Library.pairFor(factory, pToken.token, WKLAY);
+            IWKLAY(WKLAY).deposit{value: amountKLAY}();
         } else {
-            (amountA, amountB) = _swapToAddLiquidityOptimal(
+            IWKLAY(WKLAY).deposit{value: msg.value}();
+            AddLiquidityParams memory pWklay = AddLiquidityParams(WKLAY, msg.value, amountKLAYMin);
+            (amountToken, amountKLAY, ,swappedKLAY) = _swapToAddLiquidityOptimal(
                 pair,
-                tokenA,
-                tokenB,
-                amountADesired,
-                amountBDesired,
-                amountAMin,
-                amountBMin
+                pToken,
+                pWklay
             );
+            if (msg.value > amountKLAY + swappedKLAY)
+                IWKLAY(WKLAY).withdraw(msg.value - (amountKLAY + swappedKLAY));
         }
-        TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
-        TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+        TransferHelper.safeTransferFrom(pToken.token, msg.sender, pair, amountToken);
+        assert(IWKLAY(WKLAY).transfer(pair, amountKLAY));
         liquidity = IUniswapV2Pair(pair).mint(to);
+        // refund dust KLAY, if any
+        if (msg.value > amountKLAY + swappedKLAY)
+            TransferHelper.safeTransferETH(msg.sender, msg.value - (amountKLAY + swappedKLAY));
     }
 
     function addLiquidityKLAYOptimal(
@@ -311,39 +359,11 @@ contract UniswapV2Router02 {
             uint256 liquidity
         )
     {
-        address pair = IUniswapV2Factory(factory).getPair(token, WKLAY);
-        if (pair == address(0)) {
-            (amountToken, amountKLAY) = _addLiquidity(
-                token,
-                WKLAY,
-                amountTokenDesired,
-                msg.value,
-                amountTokenMin,
-                amountKLAYMin
-    
-            );
-            pair = UniswapV2Library.pairFor(factory, token, WKLAY);
-            IWKLAY(WKLAY).deposit{value: amountKLAY}();
-        } else {
-            IWKLAY(WKLAY).deposit{value: msg.value}();
-            (amountToken, amountKLAY) = _swapToAddLiquidityOptimal(
-                pair,
-                token,
-                WKLAY,
-                amountTokenDesired,
-                msg.value,
-                amountTokenMin,
-                amountKLAYMin
-            );
-            if (msg.value > amountKLAY)
-                IWKLAY(WKLAY).withdraw(msg.value - amountKLAY);
-        }
-        TransferHelper.safeTransferFrom(token, msg.sender, pair, amountToken);
-        assert(IWKLAY(WKLAY).transfer(pair, amountKLAY));
-        liquidity = IUniswapV2Pair(pair).mint(to);
-        // refund dust KLAY, if any
-        if (msg.value > amountKLAY)
-            TransferHelper.safeTransferETH(msg.sender, msg.value - amountKLAY);
+        return _addLiquidityKLAYOptimal(
+            AddLiquidityParams(token, amountTokenDesired, amountTokenMin),
+            amountKLAYMin,
+            to
+        );
     }
 
     // **** REMOVE LIQUIDITY ****
