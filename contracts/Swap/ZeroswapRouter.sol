@@ -210,34 +210,34 @@ contract ZeroswapRouter {
         bool discountable = swapComptroller.isDiscountable(pIn.token, pOut.token);
         uint256 feeRate = discountable ? swapComptroller.discountedFee() : swapComptroller.fee();
         swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, pIn.amountDesired, pOut.amountDesired, feeRate);
-        if (swapAmountIn > 0) {
-            swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
-            uint256 requiredFee = discountable ? swapComptroller.getRequiredFee(pIn.token, pOut.token, swapAmountIn, swapAmountOut) : 0;
-            require(requiredFee <= maxFee, "ZeroswapRouter: EXCESSIVE_FEE");
-            if (requiredFee > 0) {
-                TransferHelper.safeTransferFrom(
-                    swapComptroller.feeToken(),
-                    msg.sender,
-                    address(swapComptroller),
-                    requiredFee
-                );
-            }
-
+        if (swapAmountIn == 0) return (0, 0);
+        swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
+        if (swapAmountOut == 0) return (0, 0);
+        uint256 requiredFee = discountable ? swapComptroller.getRequiredFee(pIn.token, pOut.token, swapAmountIn, swapAmountOut) : 0;
+        require(requiredFee <= maxFee, "ZeroswapRouter: EXCESSIVE_FEE");
+        if (requiredFee > 0) {
             TransferHelper.safeTransferFrom(
-                pIn.token,
-                pIn.token == WKLAY && msg.value > 0 ? address(this) : msg.sender,
-                pair,
-                swapAmountIn
-            );
-
-            swapComptroller.swap(pIn.token, pOut.token, 0, swapAmountOut, address(this), new bytes(0));
-
-            TransferHelper.safeTransfer(
-                pOut.token,
-                pair,
-                swapAmountOut
+                swapComptroller.feeToken(),
+                msg.sender,
+                address(swapComptroller),
+                requiredFee
             );
         }
+
+        TransferHelper.safeTransferFrom(
+            pIn.token,
+            pIn.token == WKLAY && msg.value > 0 ? address(this) : msg.sender,
+            pair,
+            swapAmountIn
+        );
+
+        swapComptroller.swap(pIn.token, pOut.token, 0, swapAmountOut, address(this), new bytes(0));
+
+        TransferHelper.safeTransfer(
+            pOut.token,
+            pair,
+            swapAmountOut
+        );
     }
 
     function _swapToAddLiquidityOptimalInternalD2(

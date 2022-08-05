@@ -165,26 +165,25 @@ contract UniswapV2Router02 {
     {
         uint256 feeRate = IZeroswapComptroller(IUniswapV2Factory(factory).swapComptroller()).fee();
         swapAmountIn = UniswapV2Library.getSwapInAmountToAddLiquidity(reserveIn, reserveOut, pIn.amountDesired, pOut.amountDesired, feeRate);
-        if (swapAmountIn > 0) {
-            swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
+        if (swapAmountIn == 0) return (0, 0);
+        swapAmountOut = UniswapV2Library.getAmountOut(swapAmountIn, reserveIn, reserveOut, feeRate);
+        if (swapAmountOut == 0) return (0, 0);
+        TransferHelper.safeTransferFrom(
+            pIn.token,
+            pIn.token == WKLAY && msg.value > 0 ? address(this) : msg.sender,
+            pair,
+            swapAmountIn
+        );
 
-            TransferHelper.safeTransferFrom(
-                pIn.token,
-                pIn.token == WKLAY && msg.value > 0 ? address(this) : msg.sender,
-                pair,
-                swapAmountIn
-            );
+        (address token0, ) = UniswapV2Library.sortTokens(pIn.token, pOut.token);
+        IUniswapV2Pair(pair)
+            .swap(token0 == pIn.token ? 0 : swapAmountOut, token0 == pIn.token ? swapAmountOut : 0, address(this), new bytes(0));
 
-            (address token0, ) = UniswapV2Library.sortTokens(pIn.token, pOut.token);
-            IUniswapV2Pair(pair)
-                .swap(token0 == pIn.token ? 0 : swapAmountOut, token0 == pIn.token ? swapAmountOut : 0, address(this), new bytes(0));
-
-            TransferHelper.safeTransfer(
-                pOut.token,
-                pair,
-                swapAmountOut
-            );
-        }
+        TransferHelper.safeTransfer(
+            pOut.token,
+            pair,
+            swapAmountOut
+        );
     }
 
     function _swapToAddLiquidityOptimalInternalD2(
