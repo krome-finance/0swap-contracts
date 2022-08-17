@@ -6,7 +6,6 @@ import "./interfaces/IUniswapV2Pair.sol";
 import './interfaces/IERC20.sol';
 import "./interfaces/IPriceOracle.sol";
 import "./libraries/UniswapV2Library.sol";
-import "hardhat/console.sol";
 
 interface IZeroSwapPair is IUniswapV2Pair {
     function swapInFeeRate(uint amount0Out, uint amount1Out, uint256 feeRate, address to, bytes calldata data) external returns (uint256, uint256);
@@ -23,6 +22,7 @@ contract SwapComptroller is LocatorBasedProxyV2 {
     address public feeToken;
     uint256 public feeReserve;
     mapping(address => uint256) public receivedFeeForPair;
+    address public pivotToken;
 
     struct OracleInfo {
         IPriceOracle oracle;
@@ -61,60 +61,102 @@ contract SwapComptroller is LocatorBasedProxyV2 {
     }
 
     function isDiscountable(address token0, address token1) public view returns (bool) {
-        return(address(priceOracles[token0].oracle) != address(0) || address(priceOracles[token1].oracle) != address(0));
+        return feeToken != address(0) && pivotToken != address(0) && (token0 == pivotToken || token1 == pivotToken || token0 == feeToken || token1 == feeToken);
     }
 
-    function getOracle(address tokenA, address tokenB) public view returns (OracleInfo memory oracle, address oracleToken, uint256 unitAmount) {
-        (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
-        OracleInfo memory oracle0 = priceOracles[token0];
-        OracleInfo memory oracle1 = priceOracles[token1];
+    // function getOracle(address tokenA, address tokenB) public view returns (OracleInfo memory oracle, address oracleToken, uint256 unitAmount) {
+    //     if (tokenA == feeToken || tokenB == feeToken) {
+    //         return (priceOracles[feeToken], feeToken, 10 ** IERC20(feeToken).decimals());
+    //     }
+    //     (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+    //     OracleInfo memory oracle0 = priceOracles[token0];
+    //     OracleInfo memory oracle1 = priceOracles[token1];
 
-        uint8 decimals0 = IERC20(token0).decimals();
-        uint8 decimals1 = IERC20(token1).decimals();
+    //     uint8 decimals0 = IERC20(token0).decimals();
+    //     uint8 decimals1 = IERC20(token1).decimals();
 
-        if (address(oracle0.oracle) != address(0) && (address(oracle1.oracle) == address(0) || decimals0 >= decimals1)) {
-            return (oracle0,  token0, 10 ** decimals0);
-        } else if (address(oracle1.oracle) != address(0)) {
-            return (oracle1,  token1, 10 ** decimals1);
-        }
-    }
+    //     if (address(oracle0.oracle) != address(0) && (address(oracle1.oracle) == address(0) || decimals0 >= decimals1)) {
+    //         return (oracle0,  token0, 10 ** decimals0);
+    //     } else if (address(oracle1.oracle) != address(0)) {
+    //         return (oracle1,  token1, 10 ** decimals1);
+    //     }
+    // }
 
     function getRequiredFee(address token0, address token1, uint256 amount0, uint256 amount1) external view returns (uint256) {
-        (OracleInfo memory oracle, address oracleToken, uint256 unitAmount) = getOracle(token0, token1);
-        return _getRequiredFee(oracle, unitAmount, oracleToken == token0 ? amount0 : amount1, discountedFee());
+        uint256 feeRate = discountedFee();
+        // (OracleInfo memory oracle, address oracleToken, uint256 unitAmount) = getOracle(token0, token1);
+        return _getRequiredFee(token0, token1, amount0, amount1, feeRate);
     }
 
-    function _getRequiredFee(OracleInfo memory oracleInfo, uint256 unitAmount, uint256 amount, uint256 feeRate) public view returns (uint256) {
-        require(address(oracleInfo.oracle) != address(0), "no available oracle for tokens");
-        uint256 amountInUsd = amount * oracleInfo.oracle.getLatestPrice() / unitAmount;
-        uint256 pricePrecision = 10 ** oracleInfo.decimals;
+    function _getPivotPairReserves() view internal returns (uint256 pairFeeReserve, uint256 pairPivotReserve) {
+        IZeroSwapPair pair = IZeroSwapPair(UniswapV2Library.pairFor(factory, pivotToken, feeToken));
+        (address token0, ) = UniswapV2Library.sortTokens(pivotToken, feeToken);
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        (pairFeeReserve, pairPivotReserve) = token0 == pivotToken ? (r1, r0) : (r0, r1);
+    }
 
-        OracleInfo memory feeOracleInfo = priceOracles[feeToken];
-        require(address(feeOracleInfo.oracle) != address(0), "fee token oracle required");
-        uint256 feePricePrecision = 10 ** feeOracleInfo.decimals;
+    function _getRequiredFee(
+        address token0,
+        address token1,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 feeRate
+    ) internal view returns (uint256) {
+        (uint256 pairFeeReserve, uint256 pairPivotReserve) = (token0 != feeToken && token1 != feeToken) ? _getPivotPairReserves() : (1, 1);
+        return _calcRequiredFeeFor(feeToken, pivotToken, pairFeeReserve, pairPivotReserve, token0, token1, amount0, amount1, feeRate);
+    }
 
-        uint256 feeUnitAmount = 10 ** IERC20(feeToken).decimals();
-        return ((amountInUsd * feeUnitAmount / pricePrecision) * feePricePrecision / feeOracleInfo.oracle.getLatestPrice()) * feeRate / 1e4;
+    function _calcRequiredFeeFor(
+        address _feeToken,
+        address _pivotToken,
+        uint256 pairFeeReserve,
+        uint256 pairPivotReserve,
+        address token0,
+        address token1,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 feeRate
+    ) internal pure returns (uint256) {
+        if (token0 == _feeToken) return amount0 * feeRate / 1e4;
+        if (token1 == _feeToken) return amount1 * feeRate / 1e4;
+        if (token0 == _pivotToken) {
+            return ((amount0 * pairFeeReserve) / pairPivotReserve) * feeRate / 1e4;
+        }
+        if (token1 == _pivotToken) {
+            return ((amount1 * pairFeeReserve) / pairPivotReserve) * feeRate / 1e4;
+        }
+        revert("pivot or fee token required");
     }
 
     function _swapPairWithFee(
         IZeroSwapPair pair,
-        OracleInfo memory oracleInfo,
-        address oracleToken,
-        uint256 unitAmount,
         address token0,
+        address token1,
         uint256 amount0Out,
         uint256 amount1Out,
         address to,
         bytes memory data
     ) internal returns (uint256 requiredFee) {
-        (uint256 amount0In, uint256 amount1In) = pair.swapInFeeRate(amount0Out, amount1Out, 0, to, data);
+        // save pair reserves before swap occurred
+        (uint256 pairFeeReserve, uint256 pairPivotReserve) = _getPivotPairReserves();
+
+        {
+            // avoid stack too deep
+            (uint256 amount0In, uint256 amount1In) = pair.swapInFeeRate(amount0Out, amount1Out, 0, to, data);
+            amount0Out += amount0In;
+            amount1Out += amount1In;
+        }
 
         uint256 feeRate = discountedFee();
-        requiredFee = _getRequiredFee(
-            oracleInfo,
-            unitAmount,
-            oracleToken == token0 ? amount0In + amount0Out : amount1In + amount1Out,
+        requiredFee = _calcRequiredFeeFor(
+            feeToken,
+            pivotToken,
+            pairFeeReserve,
+            pairPivotReserve,
+            token0,
+            token1,
+            amount0Out,
+            amount1Out,
             feeRate);
     }
 
@@ -132,15 +174,13 @@ contract SwapComptroller is LocatorBasedProxyV2 {
             pair.swap(amountAOut, amountBOut, to, data);
             return;
         }
-        (OracleInfo memory oracleInfo, address oracleToken, uint256 unitAmount) = getOracle(tokenA, tokenB);
-
         // reserves before swap
-        uint256 requiredFee = _swapPairWithFee(pair, oracleInfo, oracleToken, unitAmount, tokenA, amountAOut, amountBOut, to, data);
+        uint256 requiredFee = _swapPairWithFee(pair, tokenA, tokenB, amountAOut, amountBOut, to, data);
 
         uint256 feeBalance = IERC20(feeToken).balanceOf(address(this));
         require(feeBalance - feeReserve >= requiredFee, "Not enough fee token received");
         feeReserve += requiredFee;
-        receivedFeeForPair[address(pair)] = requiredFee;
+        receivedFeeForPair[address(pair)] += requiredFee;
     }
 
     function _safeTransfer(address token, address to, uint value) private {
@@ -153,20 +193,12 @@ contract SwapComptroller is LocatorBasedProxyV2 {
         discountRate = _discountRate;
     }
 
-    function setFeeToken(address _feeToken) external onlyManager {
-        feeToken = _feeToken;
+    function setFeeToken(address _token) external onlyManager {
+        feeToken = _token;
     }
 
-    function setPriceOracle(address token, address _oracleAddress) external onlyManager {
-        IPriceOracle oracle = IPriceOracle(_oracleAddress);
-        if (_oracleAddress == address(0)) {
-            priceOracles[token] = OracleInfo(oracle, 0);
-        } else {
-            // validate oracle
-            uint256 decimals = oracle.getDecimals();
-            require(uint256(uint8(decimals)) == decimals, "invalid decimals");
-            priceOracles[token] = OracleInfo(oracle, uint8(decimals));
-        }
+    function setPivotToken(address _token) external onlyManager {
+        pivotToken = _token;
     }
 
     function recoverERC20(address token, address to, uint256 amount) external onlyManager {
@@ -194,19 +226,28 @@ contract SwapComptroller is LocatorBasedProxyV2 {
         require(path.length >= 2, "UniswapV2Library: INVALID_PATH");
         amounts = new uint256[](path.length);
         amounts[0] = amountIn;
-        uint256 tokenFee = fee > discountRate ? fee - discountRate : 0;
+        (uint256 pairFeeReserve, uint256 pairPivotReserve) = _getPivotPairReserves();
+        uint256 tokenFee = discountedFee();
         for (uint256 i; i < path.length - 1; i++) {
             (uint256 reserveIn, uint256 reserveOut) = UniswapV2Library.getReserves(
                 factory,
                 path[i],
                 path[i + 1]
             );
-            (OracleInfo memory oracleInfo, address oracleToken, uint256 unitAmount) = getOracle(path[i], path[i + 1]);
-            if (address(oracleInfo.oracle) == address(0)) {
+            if (!isDiscountable(path[i], path[i + 1])) {
                 amounts[i + 1] = UniswapV2Library.getAmountOut(amounts[i], reserveIn, reserveOut, fee);
             } else {
                 amounts[i + 1] = UniswapV2Library.getAmountOut(amounts[i], reserveIn, reserveOut, 0);
-                requiredFee += _getRequiredFee(oracleInfo, unitAmount, oracleToken == path[i] ? amounts[i] : amounts[i + 1], tokenFee);
+
+                requiredFee += _calcRequiredFeeFor(feeToken, pivotToken, pairFeeReserve, pairPivotReserve, path[i], path[i + 1], amounts[i], amounts[i + 1], tokenFee);
+            }
+
+            if (path[i] == feeToken && path[i + 1] == pivotToken) {
+                pairFeeReserve += amounts[i];
+                pairPivotReserve -= amounts[i + 1];
+            } else if (path[i] == pivotToken && path[i + 1] == feeToken) {
+                pairFeeReserve -= amounts[i + 1];
+                pairPivotReserve += amounts[i];
             }
         }
     }
@@ -219,19 +260,26 @@ contract SwapComptroller is LocatorBasedProxyV2 {
         require(path.length >= 2, "UniswapV2Library: INVALID_PATH");
         amounts = new uint256[](path.length);
         amounts[amounts.length - 1] = amountOut;
+
+        (uint256 pairFeeReserve, uint256 pairPivotReserve) = _getPivotPairReserves();
         uint256 tokenFee = fee > discountRate ? fee - discountRate : 0;
         for (uint256 i = path.length - 1; i > 0; i--) {
-            address tokenIn = path[i - 1];
-            address tokenOut = path[i];
+            (uint256 reserveIn, uint256 reserveOut) = UniswapV2Library.getReserves(factory, path[i - 1], path[i]);
 
-            (uint256 reserveIn, uint256 reserveOut) = UniswapV2Library.getReserves(factory, tokenIn, tokenOut);
-
-            (OracleInfo memory oracleInfo, address oracleToken, uint256 unitAmount) = getOracle(tokenIn, tokenOut);
-            if (address(oracleInfo.oracle) == address(0)) {
+            if (!isDiscountable(path[i - 1], path[i])) {
                 amounts[i - 1] = UniswapV2Library.getAmountIn(amounts[i], reserveIn, reserveOut, fee);
             } else {
                 amounts[i - 1] = UniswapV2Library.getAmountIn(amounts[i], reserveIn, reserveOut, 0);
-                requiredFee += _getRequiredFee(oracleInfo, unitAmount, oracleToken == tokenIn ? amounts[i - 1] : amounts[i], tokenFee);
+
+                requiredFee += _calcRequiredFeeFor(feeToken, pivotToken, pairFeeReserve, pairPivotReserve, path[i - 1], path[i], amounts[i - 1], amounts[i], tokenFee);
+            }
+
+            if (path[i - 1] == feeToken && path[i] == pivotToken) {
+                pairFeeReserve += amounts[i - 1];
+                pairPivotReserve -= amounts[i];
+            } else if (path[i - 1] == pivotToken && path[i] == feeToken) {
+                pairFeeReserve -= amounts[i];
+                pairPivotReserve += amounts[i - 1];
             }
         }
     }
